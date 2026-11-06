@@ -7,6 +7,7 @@ This work was conducted as the Special Term 1st Aeronautical Stream Project with
 
 ## Authors & Contributors
 **M.B.I.A. Rathnayaka 250526R** – Department of Mechanical Engineering, University of Moratuwa
+
 **K.G.K. Madushan 250386K** – Department of Mechanical Engineering, University of Moratuwa
 
 Generative AI tools (including large language models) were utilized during the development of this repository for code scaffolding, debugging, optimization, and documentation assistance. All analytical formulations, aerodynamic parameters, geometry definitions, and outputs were manually reviewed, validated, and integrated by the authors.
