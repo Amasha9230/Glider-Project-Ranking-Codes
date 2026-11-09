@@ -2,24 +2,28 @@ import glob
 import os
 import re
 
-# 1. Directory containing the exported XFLR5 polar files
-polar_dir = r"C:\polar_data"
-output_all = os.path.join(polar_dir, "ALL_RANKED_AIRFOILS.csv")
-output_top10 = os.path.join(polar_dir, "TOP_10_WEIGHTED_AIRFOILS.csv")
+# 1. DIRECTORY SETUP & FILE OUTPUTS
+
+polar_dir = r"C:\polar_data"  # Folder containing raw XFLR5 polar exports
+output_all = os.path.join(polar_dir, "ALL_RANKED_AIRFOILS.csv")  # Destination for full ranking
+output_top10 = os.path.join(polar_dir, "TOP_10_WEIGHTED_AIRFOILS.csv")  # Destination for top 10 shortlist
 
 
 def parse_polar_file(filepath):
+  """Reads a single XFLR5 polar file and extracts aerodynamic performance metrics."""
   foil_name = "Unknown"
   re_val = "Unknown"
   records = []
 
+  # Safe file read; skip file if corrupted
   try:
     with open(filepath, "r", errors="ignore") as f:
       lines = f.readlines()
   except Exception:
     return None
 
-  # Parse header metadata for airfoil name and Re
+  # --- A. Header Extraction ---
+  # Search first 15 lines for airfoil name and Reynolds number
   for line in lines[:15]:
     if "Calculated polar for:" in line:
       foil_name = line.replace("Calculated polar for:", "").strip()
@@ -28,27 +32,31 @@ def parse_polar_file(filepath):
       if m:
         re_val = m.group(1).split()[0].replace(",", "")
 
-  # Fallback to filename if header was generic
+  # extract name from filename if missing in header
   if foil_name == "Unknown" or not foil_name:
     base = os.path.basename(filepath).replace(".txt", "").replace(".plr", "")
     foil_name = re.sub(r"_T\d+_Re.*$", "", base)
 
-  # Extract numerical rows: [Alpha, Cl, Cd, Cdp, Cm]
+  # B. Numerical Aerodynamic Data ---
+  # Expected columns: Alpha, Cl, Cd, Cdp, Cm
   for line in lines:
     clean = line.strip()
+    # Check if row starts with a numeric value
     if clean and re.match(r"^-?\d+\.\d+", clean):
       parts = [float(v) for v in clean.split()]
       if len(parts) >= 5:
         records.append({
-            "alpha": parts[0],
-            "cl": parts[1],
-            "cd": parts[2],
-            "cm": parts[4],
+            "alpha": parts[0],  # Angle of attack (deg)
+            "cl": parts[1],  # Lift coefficient
+            "cd": parts[2],  # Drag coefficient
+            "cm": parts[4],  # Pitching moment coefficient
         })
 
+  # Discard incomplete or failed simulations
   if len(records) < 4:
     return None
 
+  # --- C. Figure of Merit Tracking Variables ---
   best_ld = -999.0
   best_alpha = 0.0
   best_cl = 0.0
@@ -58,6 +66,7 @@ def parse_polar_file(filepath):
   cm0 = 0.0
   min_alpha_diff = 999.0
 
+  # Scan each angle of attack to evaluate flight metrics
   for r in records:
     a = r["alpha"]
     cl = r["cl"]
@@ -67,25 +76,29 @@ def parse_polar_file(filepath):
     # Filter for positive physical glide region
     if cd > 0:
       ld = cl / cd
+      # Track peak glide ratio (Max distance condition)
       if ld > best_ld:
         best_ld = ld
         best_alpha = a
         best_cl = cl
         best_cd = cd
 
+      # Track loiter / power factor (Min sink speed / max flight time)
       if cl > 0:
         pf = (cl**1.5) / cd
         if pf > max_pf:
           max_pf = pf
 
+    # Track maximum lift coefficient
     if cl > max_cl:
       max_cl = cl
 
-    # Capture Cm closest to alpha = 0 deg
+    # Find zero-lift pitching moment (Cm closest to alpha = 0 deg)
     if abs(a - 0.0) < min_alpha_diff:
       min_alpha_diff = abs(a - 0.0)
       cm0 = cm
 
+  # Return single summarized airfoil dictionary
   return {
       "Airfoil": foil_name,
       "Re": re_val,
@@ -100,10 +113,14 @@ def parse_polar_file(filepath):
   }
 
 
-# 2. Scan and parse all polar text files
+# ---------------------------------------------------------
+# 2. SCAN DIRECTORY & PARSE ALL FILES
+# ---------------------------------------------------------
 all_files = glob.glob(os.path.join(polar_dir, "*.*"))
 results = []
+
 for fp in all_files:
+  # Process polar files while skipping output CSVs
   if fp.endswith((".txt", ".plr", ".csv")) and "AIRFOIL" not in fp:
     res = parse_polar_file(fp)
     if res and res["Max_L_D"] > 0:
@@ -112,7 +129,10 @@ for fp in all_files:
 if not results:
   print("No valid polar files found in " + polar_dir)
 else:
-  # 3. Deduplicate: keep highest Max L/D for each unique airfoil name
+  # ---------------------------------------------------------
+  # 3. DEDUPLICATION
+  # ---------------------------------------------------------
+  # Keep only the highest Max L/D polar for each unique airfoil name
   unique_foils = {}
   for item in results:
     name = item["Airfoil"]
@@ -124,7 +144,10 @@ else:
 
   foils_list = list(unique_foils.values())
 
-  # 4. Normalize metrics (0 to 1 scaling)
+  # ---------------------------------------------------------
+  # 4. NORMALIZATION & COMPOSITE SCORING
+  # ---------------------------------------------------------
+  # Extract arrays for min-max scaling across all candidates
   all_ld = [f["Max_L_D"] for f in foils_list]
   all_pf = [f["Max_CL1.5_CD"] for f in foils_list]
   all_cm = [abs(f["Cm0"]) for f in foils_list]
@@ -133,20 +156,29 @@ else:
   min_pf, max_pf = min(all_pf), max(all_pf)
   min_cm, max_cm = min(all_cm), max(all_cm)
 
-  # Scale metrics and apply composite weighting:
-  # 50% Distance + 35% Flight Time + 15% Pitch Trim Stability
+  # Scale metrics (0 to 1) and calculate composite utility score
   for f in foils_list:
-    n_ld = (f["Max_L_D"] - min_ld) / (max_ld - min_ld + 1e-9)
-    n_pf = (f["Max_CL1.5_CD"] - min_pf) / (max_pf - min_pf + 1e-9)
-    n_cm = 1.0 - ((abs(f["Cm0"]) - min_cm) / (max_cm - min_cm + 1e-9))
+    n_ld = (f["Max_L_D"] - min_ld) / (
+        max_ld - min_ld + 1e-9
+    )  # Normalized Glide
+    n_pf = (f["Max_CL1.5_CD"] - min_pf) / (
+        max_pf - min_pf + 1e-9
+    )  # Normalized Loiter
+    n_cm = 1.0 - (
+        (abs(f["Cm0"]) - min_cm) / (max_cm - min_cm + 1e-9)
+    )  # Mild moment reward (inverted penalty)
 
+    # Multi-attribute weights: 50% Distance + 35% Flight Time + 15% Pitch Trim
     score = (0.50 * n_ld + 0.35 * n_pf + 0.15 * n_cm) * 100.0
     f["Score"] = round(score, 1)
 
-  # 5. Sort all airfoils descending by composite score
+  # ---------------------------------------------------------
+  # 5. SORTING & LEADERBOARD DISPLAY
+  # ---------------------------------------------------------
+  # Sort all candidates descending by total score
   ranked = sorted(foils_list, key=lambda x: x["Score"], reverse=True)
 
-  # 6. Display ALL airfoils in the terminal
+  # Print complete leaderboard to terminal
   print("\n" + "=" * 88)
   print(
       f"   COMPLETE AIRFOIL RANKING ({len(ranked)} AIRFOILS): 50% DISTANCE /"
@@ -164,13 +196,16 @@ else:
         f" {f['Alpha_at_Max_L_D']:<7.1f} {f['Max_CL1.5_CD']:<11.2f}"
         f" {f['Max_CL']:<8.3f} {f['Cm0']:<6.3f}"
     )
-    # Add a visual separator after the Top 10
+    # Visual marker after Top 10 cutoff
     if i == 10:
       print("-" * 88 + "  [TOP 10 SHORTLIST CUTOFF]")
 
   print("=" * 88)
 
-  # 7. Export Full Ranking CSV
+  # ---------------------------------------------------------
+  # 6. CSV EXPORTS
+  # ---------------------------------------------------------
+  # Export 1: Complete list of all evaluated airfoils
   with open(output_all, "w") as out:
     out.write(
         "Rank,Airfoil,Score,Max_L_D,Alpha_at_Max_L_D,CL_at_Max_L_D,CD_at_Max_L_D,Max_CL,Max_CL1.5_CD,Cm0,Re\n"
@@ -180,7 +215,7 @@ else:
           f"{i},{f['Airfoil']},{f['Score']},{f['Max_L_D']},{f['Alpha_at_Max_L_D']},{f['CL_at_Max_L_D']},{f['CD_at_Max_L_D']},{f['Max_CL']},{f['Max_CL1.5_CD']},{f['Cm0']},{f['Re']}\n"
       )
 
-  # 8. Export Top 10 CSV
+  # Export 2: Shortlisted Top 10 airfoils advancing to 3D verification
   with open(output_top10, "w") as out:
     out.write(
         "Rank,Airfoil,Score,Max_L_D,Alpha_at_Max_L_D,CL_at_Max_L_D,CD_at_Max_L_D,Max_CL,Max_CL1.5_CD,Cm0,Re\n"
